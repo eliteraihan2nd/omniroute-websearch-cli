@@ -1,0 +1,22 @@
+#!/usr/bin/env sh
+# LOCAL-DEV WRAPPER ONLY — never shipped or used in real usage.
+# This file is excluded from the published package (see package.json "files");
+# the published bin (dist/src/index.js) is env-only and never reads .env.
+# Use this only for trying things locally: ./omni-websearch <command>
+set -e
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+# Local-dev only: load .env from the repo root if present (no dotenv dep).
+# set -a exports every KEY=VALUE into the environment for the bun subprocess.
+if [ -f "$DIR/.env" ]; then
+  set -a
+  . "$DIR/.env"
+  set +a
+fi
+
+BIN="$DIR/dist/src/index.js"
+if [ ! -f "$BIN" ]; then
+  echo "dist not built; running build first…" >&2
+  (cd "$DIR" && bun run build)
+fi
+exec bun "$BIN" "$@"

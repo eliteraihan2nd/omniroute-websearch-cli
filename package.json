@@ -1,0 +1,43 @@
+{
+  "name": "omniroute-websearch-cli",
+  "version": "0.1.5",
+  "description": "Env-only CLI for OmniRoute web search and web fetch via /v1/search and /v1/web/fetch",
+  "bin": {
+    "omni-websearch": "./dist/src/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/src/index.js",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "test": "node --test dist/**/*.test.js",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "omniroute",
+    "websearch",
+    "web-fetch",
+    "search",
+    "tavily",
+    "exa",
+    "cli",
+    "opencode"
+  ],
+  "author": "raihanno",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eliteraihan2nd/omniroute-websearch-cli.git"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "bun": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}

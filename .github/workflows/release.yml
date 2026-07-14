@@ -1,0 +1,75 @@
+name: release
+
+# Build standalone binaries for every target on a `v*` tag push, then attach
+# them to a GitHub Release. The assistant never builds or publishes — this CI
+# does. Author the tag (e.g. v0.1.0) and push to trigger.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun ci
+
+      - name: Build dist
+        run: bun run build
+
+      - name: Compile standalone binary
+        run: bun build dist/src/index.js --compile --minify --outfile "omni-websearch-${{ matrix.target }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: omni-websearch-${{ matrix.target }}
+          path: omni-websearch-${{ matrix.target }}
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: artifacts/omni-websearch-*
+          generate_release_notes: true
+
+      - name: Retain only the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Delete every release except the one just created by this tag.
+          gh release list --limit 100 --json tag,isLatest \
+            | jq -r '.[] | select(.isLatest == false) | .tag' \
+            | while read -r tag; do
+                echo "Deleting stale release $tag"
+                gh release delete "$tag" --yes || true
+              done
