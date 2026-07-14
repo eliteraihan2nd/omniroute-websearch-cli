@@ -1,0 +1,220 @@
+import { afterEach, describe, it, mock } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ConfigurationError, loadConfig } from '../src/config.js';
+import { parseArgs, runCli } from '../src/index.js';
+import { executeFetch, executeSearch, discoverProviders } from '../src/search.js';
+
+const configVariables = [
+  'OMNIROUTE_CUSTOM_WEBSEARCH_URL',
+  'OMNIROUTE_CUSTOM_WEBSEARCH_API_KEY',
+  'OMNIROUTE_CUSTOM_WEBSEARCH_PROVIDERS',
+  'XDG_CONFIG_HOME',
+  'HOME',
+] as const;
+
+const originalEnvironment = new Map(
+  configVariables.map((name) => [name, process.env[name]]),
+);
+
+let fetchMock: ReturnType<typeof mock.method> | undefined;
+let logMock: ReturnType<typeof mock.method> | undefined;
+
+afterEach(() => {
+  fetchMock?.mock.restore();
+  logMock?.mock.restore();
+  fetchMock = undefined;
+  logMock = undefined;
+
+  for (const [name, value] of originalEnvironment) {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
+});
+
+function mockJsonResponse(body: unknown): void {
+  fetchMock = mock.method(
+    globalThis,
+    'fetch',
+    async () => new Response(JSON.stringify(body), { status: 200 }),
+  );
+}
+
+describe('CLI JSON and environment contract', () => {
+  it('reads only <XDG_CONFIG_HOME>/omni-websearch/, ignoring a stray file', async () => {
+    // The app's own subdirectory is the only place config is read, so a file
+    // dropped directly in XDG_CONFIG_HOME must not be picked up.
+    const configHome = await mkdtemp(join(tmpdir(), 'omni-websearch-test-'));
+    await writeFile(
+      join(configHome, 'config'),
+      'OMNIROUTE_CUSTOM_WEBSEARCH_URL=https://file.example\nOMNIROUTE_CUSTOM_WEBSEARCH_API_KEY=file-key\n',
+    );
+    process.env.XDG_CONFIG_HOME = configHome;
+    delete process.env.OMNIROUTE_CUSTOM_WEBSEARCH_URL;
+    delete process.env.OMNIROUTE_CUSTOM_WEBSEARCH_API_KEY;
+
+    try {
+      await assert.rejects(
+        () => loadConfig(),
+        (error: unknown) => error instanceof ConfigurationError,
+      );
+    } finally {
+      await rm(configHome, { force: true, recursive: true });
+    }
+  });
+
+  it('loads both credentials from the environment, which wins over any file', async () => {
+    process.env.OMNIROUTE_CUSTOM_WEBSEARCH_URL = 'https://env.example';
+    process.env.OMNIROUTE_CUSTOM_WEBSEARCH_API_KEY = 'env-key';
+    delete process.env.XDG_CONFIG_HOME;
+    delete process.env.HOME;
+
+    const config = await loadConfig();
+
+    assert.equal(config.omniRouteUrl, 'https://env.example');
+    assert.equal(config.omniRouteApiKey, 'env-key');
+  });
+
+  it('posts search requests to exactly one v1 path when the base URL has no v1 suffix', async () => {
+    mockJsonResponse([]);
+
+    await executeSearch('test query', undefined, 3, 'https://omni.example', 'key');
+
+    assert.equal(fetchMock?.mock.calls[0]?.arguments[0], 'https://omni.example/v1/search');
+  });
+
+  it('posts search requests to exactly one v1 path when the base URL has a v1 suffix', async () => {
+    mockJsonResponse([]);
+
+    await executeSearch('test query', undefined, 3, 'https://omni.example/v1', 'key');
+
+    assert.equal(fetchMock?.mock.calls[0]?.arguments[0], 'https://omni.example/v1/search');
+  });
+
+  it('posts fetch requests to exactly one v1 path when the base URL has no v1 suffix', async () => {
+    mockJsonResponse({ provider: 'exa-search', url: 'https://example.com', content: 'text' });
+
+    await executeFetch('https://example.com', 'https://omni.example', 'key');
+
+    assert.equal(fetchMock?.mock.calls[0]?.arguments[0], 'https://omni.example/v1/web/fetch');
+  });
+
+  it('posts fetch requests to exactly one v1 path when the base URL has a v1 suffix', async () => {
+    mockJsonResponse({ provider: 'exa-search', url: 'https://example.com', content: 'text' });
+
+    await executeFetch('https://example.com', 'https://omni.example/v1', 'key');
+
+    assert.equal(fetchMock?.mock.calls[0]?.arguments[0], 'https://omni.example/v1/web/fetch');
+  });
+
+  it('forwards an upstream search error body without converting it to a success payload', async () => {
+    fetchMock = mock.method(
+      globalThis,
+      'fetch',
+      async () => new Response('provider unavailable', { status: 503, statusText: 'Service Unavailable' }),
+    );
+
+    await assert.rejects(
+      () => executeSearch('test query', 'exa-search', 3, 'https://omni.example', 'key'),
+      /503 Service Unavailable\nprovider unavailable/,
+    );
+  });
+
+  it('rejects a malformed successful fetch response', async () => {
+    fetchMock = mock.method(
+      globalThis,
+      'fetch',
+      async () => new Response('{not-json', { status: 200 }),
+    );
+
+    await assert.rejects(
+      () => executeFetch('https://example.com', 'https://omni.example', 'key'),
+    );
+  });
+
+  it('rejects invalid and unknown command arguments before any request', () => {
+    assert.throws(() => parseArgs(['search', 'test', '--max', 'three']), /Invalid --max value/);
+    assert.throws(() => parseArgs(['search', 'test', '--unknown']), /Unknown option/);
+  });
+
+  it('emits a machine-readable JSON search result on standard output', async () => {
+    process.env.OMNIROUTE_CUSTOM_WEBSEARCH_URL = 'https://omni.example';
+    process.env.OMNIROUTE_CUSTOM_WEBSEARCH_API_KEY = 'key';
+    mockJsonResponse([
+      { title: 'Result', url: 'https://result.example', snippet: 'summary' },
+    ]);
+    const output: string[] = [];
+    logMock = mock.method(console, 'log', (...values: unknown[]) => {
+      output.push(values.map(String).join(' '));
+    });
+
+    await runCli(['search', 'query']);
+
+    assert.deepEqual(JSON.parse(output[0] ?? ''), [{
+      title: 'Result',
+      url: 'https://result.example',
+      snippet: 'summary',
+    }]);
+  });
+
+  it('sends a provider from OMNIROUTE_CUSTOM_WEBSEARCH_PROVIDERS on single search when --provider is absent', async () => {
+    process.env.OMNIROUTE_CUSTOM_WEBSEARCH_URL = 'https://omni.example';
+    process.env.OMNIROUTE_CUSTOM_WEBSEARCH_API_KEY = 'key';
+    process.env.OMNIROUTE_CUSTOM_WEBSEARCH_PROVIDERS = 'exa-search,tavily-search';
+    // Math.random = 0.99 lands past the exa-search cumulative weight (2/3),
+    // so the weighted draw must pick tavily-search deterministically.
+    const randomMock = mock.method(Math, 'random', () => 0.99);
+    mockJsonResponse([]);
+
+    await runCli(['search', 'query']);
+    randomMock.mock.restore();
+
+    const requestBody = JSON.parse(String((fetchMock?.mock.calls[0]?.arguments[1] as RequestInit | undefined)?.body));
+    assert.equal(requestBody.provider, 'tavily-search');
+  });
+});
+
+describe('discoverProviders', () => {
+  afterEach(() => {
+    fetchMock?.mock.restore();
+    fetchMock = undefined;
+  });
+
+  it('rejects with an API-key hint when the server returns 401', async () => {
+    fetchMock = mock.method(
+      globalThis,
+      'fetch',
+      async () => new Response('{"error":{"code":"AUTH_002"}}', { status: 401, statusText: 'Unauthorized' }),
+    );
+
+    await assert.rejects(
+      () => discoverProviders('https://omni.example', 'bad-key'),
+      /check OMNIROUTE_CUSTOM_WEBSEARCH_API_KEY/,
+    );
+  });
+
+  it('returns provider ids from a successful response', async () => {
+    fetchMock = mock.method(
+      globalThis,
+      'fetch',
+      async () => new Response(JSON.stringify({ data: [{ id: 'exa-search' }, { id: 'tavily-search' }] }), { status: 200 }),
+    );
+
+    assert.deepEqual(await discoverProviders('https://omni.example', 'key'), ['exa-search', 'tavily-search']);
+  });
+
+  it('returns an empty array for a valid 200 response with no providers', async () => {
+    fetchMock = mock.method(
+      globalThis,
+      'fetch',
+      async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    );
+
+    assert.deepEqual(await discoverProviders('https://omni.example', 'key'), []);
+  });
+});

@@ -1,0 +1,103 @@
+name: release
+
+# Build standalone binaries for every target on a `v*` tag push, then attach
+# them to a GitHub Release. This CI does the build and publish — no local
+# build step is needed. Author the tag (e.g. v0.1.0) and push to trigger.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v1
+
+      - name: Install dependencies
+        run: bun ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build dist
+        run: bun run build
+
+      - name: Test
+        run: npm test
+
+      - name: Compile standalone binary
+        run: bun build dist/src/index.js --compile --minify --outfile "omni-websearch-${{ matrix.target }}"
+
+      - name: Smoke test binary (version + help)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          tmp=$(mktemp -d)
+          cp "omni-websearch-${{ matrix.target }}" "$tmp/omni-websearch"
+          cd "$tmp"
+          # version must match package.json and work with no package.json around
+          actual=$("./omni-websearch" --version)
+          echo "version: $actual (expected $VERSION)"
+          if [ "$actual" != "$VERSION" ]; then
+            echo "version mismatch: got '$actual', expected '$VERSION'" >&2
+            exit 1
+          fi
+          "./omni-websearch" help | head -20
+
+      - name: Smoke test binary (invalid input exits non-zero)
+        run: |
+          set +e
+          "./omni-websearch-${{ matrix.target }}" fetch not-a-url >/dev/null 2>&1
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "expected non-zero exit for invalid fetch URL, got 0" >&2
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omni-websearch-${{ matrix.target }}
+          path: omni-websearch-${{ matrix.target }}
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum omni-websearch-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/omni-websearch-*
+            artifacts/checksums.txt
+          generate_release_notes: true
