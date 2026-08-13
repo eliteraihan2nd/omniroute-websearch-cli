@@ -67,18 +67,22 @@ published automatically by GitHub Actions on each `v*` tag (see
 
 | Variable | Purpose | Required |
 |----------|---------|----------|
-| `OMNIROUTE_CUSTOM_WEBSEARCH_URL` | OmniRoute base URL | yes |
-| `OMNIROUTE_API_KEY` | API key (`Authorization: Bearer`) | yes |
-| `OMNIROUTE_PROVIDERS` | Comma-separated preferred providers (e.g. `tavily-search,exa-search`) | no — optional; upstream resolves selection when unset |
+| `OMNIROUTE_WEBSEARCH_URL` | OmniRoute base URL | yes |
+| `OMNIROUTE_WEBSEARCH_API_KEY` | API key (`Authorization: Bearer`) | yes |
+| `OMNIROUTE_WEBSEARCH_PROVIDERS` | Comma-separated preferred providers (e.g. `tavily-search,exa-search`) — selection list resolved **client-side** before the request reaches OmniRoute | no — optional; upstream resolves selection when unset |
 
 The CLI reads credentials **only** from environment variables. If a required
 variable is missing, it fails fast naming the exact variable to export. There is
 no file fallback and no hidden default.
 
+The base URL is normalized: both `https://host` and `https://host/v1` work — a
+trailing `/v1` is stripped once so endpoint paths are never duplicated
+(`/v1/v1/...` can't happen).
+
 ```bash
-export OMNIROUTE_CUSTOM_WEBSEARCH_URL="https://your-omniroute-host.example.com/v1"
-export OMNIROUTE_API_KEY="sk-..."
-export OMNIROUTE_PROVIDERS="tavily-search,exa-search,brave-search"   # optional
+export OMNIROUTE_WEBSEARCH_URL="https://your-omniroute-host.example.com/v1"
+export OMNIROUTE_WEBSEARCH_API_KEY="sk-..."
+export OMNIROUTE_WEBSEARCH_PROVIDERS="tavily-search,exa-search,brave-search"   # optional
 
 omni-websearch search "fp8 quantization" --max 3
 ```
@@ -124,9 +128,9 @@ Four output modes, controlled by two orthogonal flags (`--multi`, `--all-fields`
 | (3) best-effort full | `--multi --all-fields` | same shape, full upstream schema per result |
 | (4) full | `--all-fields` | single array, full upstream schema |
 
-- `--provider <name>` — force a provider (e.g. `brave-search`, `tavily-search`, `exa-search`). Overrides `OMNIROUTE_PROVIDERS`. If unset and `OMNIROUTE_PROVIDERS` is unset, the field is omitted and **upstream resolves selection** (no hardcoded default).
+- `--provider <name>` — force a provider (e.g. `brave-search`, `tavily-search`, `exa-search`). Always wins. If unset and `OMNIROUTE_WEBSEARCH_PROVIDERS` is set, the CLI picks one of them itself — weighted-random, first listed gets the highest weight (`--multi` instead fans out over all of them). If neither is set, the field is omitted and **upstream resolves selection** (no hardcoded default).
 - `--max N` — max results per call. When omitted, a **per-provider default** is used (tuned to each provider's quality ceiling, see below). Providers self-cap below the request. Invalid values fail fast.
-- `--multi` — fan out the same query concurrently (one call per target), root-keyed by provider. Target set resolves as: `--provider` (single explicit call) → all of `OMNIROUTE_PROVIDERS` (fan out) → **one call with no provider** (upstream auto-selects). `discoverProviders` is info-only (the `providers` command) and is never used to pick/send requests. A provider error becomes that key's value (upstream error as-is), no wrapper.
+- `--multi` — fan out the same query concurrently (one call per target), root-keyed by provider. Target set resolves as: `--provider` (single explicit call) → all of `OMNIROUTE_WEBSEARCH_PROVIDERS` (fan out) → **one call with no provider** (upstream auto-selects). `discoverProviders` is info-only (the `providers` command) and is never used to pick/send requests. A provider error becomes that key's value (upstream error as-is), no wrapper.
 - `--all-fields` — search only; return the **full** upstream schema (`provider_raw`, `citation`, `metadata`, `display_url`, `favicon_url`, `score`, `published_at`, ...). **By default output is curated**: only `title, url, snippet, position, content`. The curated default already drops OmniRoute envelope noise.
 - `--with-dates` — search only; retain `published_at` in the default (curated) output (off by default — only relevant for time-sensitive/news queries; upstream formats are inconsistent, passed through verbatim).
 - `--include <domains>` / `--exclude <domains>` — comma-separated domain filters.
@@ -181,20 +185,23 @@ Response shape (both providers): `{ provider, url, content, links[], metadata:{t
 
 ```bash
 omni-websearch healthcheck
-# ✓ OmniRoute is responding
+# {"ok": true}
 ```
 
 Probes the real `GET /v1/search` route (the documented provider-listing
-liveness endpoint) — not a nonexistent `/v1/health`.
+liveness endpoint) — not a nonexistent `/v1/health`. Output is JSON; on
+failure the CLI exits non-zero with a JSON error on stderr.
 
 ### providers
 
 ```bash
 omni-websearch providers
+# ["tavily-search","exa-search","brave-search","serper-search"]
 ```
 
-Lists providers discovered from OmniRoute at runtime (falls back to known
-providers if the endpoint is unreachable).
+Lists the providers discovered from OmniRoute at runtime. Output is JSON; if
+discovery fails, the CLI exits non-zero — there is no silent empty-list
+fallback.
 
 ## Local development
 
@@ -212,10 +219,13 @@ published package; the published `bunx`/`npx` forms remain strictly env-only.
 
 ## Build & test
 
+Bun is the package manager of record (`bun.lock` is committed; `package-lock.json`
+is gitignored).
+
 ```bash
-npm install
-npm run build        # tsc → dist/src/index.js
-node --test dist/**/*.test.js
+bun install
+bun run build        # tsc → dist/src/index.js
+npm test             # node --test dist/**/*.test.js
 ```
 
 ## License

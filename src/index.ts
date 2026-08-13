@@ -10,8 +10,8 @@
  *   omni-websearch providers
  */
 import { parseArgs as parseNodeArgs } from 'node:util';
-import { loadConfig, resolveBaseUrl, DEFAULT_SEARCH_MAX, DEFAULT_MAX_PER_PROVIDER, FETCH_PROVIDER_CAPS } from './config.js';
-import { executeSearch, checkHealth, discoverProviders, executeFetch, curateSearchResult, SearchResult } from './search.js';
+import { loadConfig, resolveBaseUrl, getWeightedRandom, DEFAULT_SEARCH_MAX, DEFAULT_MAX_PER_PROVIDER } from './config.js';
+import { executeSearch, checkHealth, discoverProviders, executeFetch, curateSearchResult, type SearchResult } from './search.js';
 import { formatProviderNotes } from './providers-notes.js';
 
 function getPackageVersion(): string {
@@ -34,37 +34,6 @@ function getPackageVersion(): string {
   return 'unknown';
 }
 
-/**
- * Weighted random selection from a provider map (user-configured OMNIROUTE_PROVIDERS).
- * Skips disabled providers (weight <= 0 or non-finite). Uses crypto for secure randomness.
- * Returns undefined only if no enabled providers remain.
- */
-export function getWeightedRandom(providers: Record<string, number>): string | undefined {
-  // Filter to enabled providers: weight must be a positive finite number
-  const enabled: Array<{ name: string; weight: number }> = [];
-  for (const [name, rawWeight] of Object.entries(providers)) {
-    const weight = Number(rawWeight);
-    // Invalid numeric (NaN, non-number) or <= 0 → disabled
-    if (!Number.isFinite(weight) || weight <= 0) continue;
-    enabled.push({ name, weight });
-  }
-
-  if (enabled.length === 0) return undefined;
-
-  const totalWeight = enabled.reduce((sum, p) => sum + p.weight, 0);
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  let random = (buf[0] / (0xFFFFFFFF + 1)) * totalWeight;
-
-  for (const provider of enabled) {
-    random -= provider.weight;
-    if (random < 0) return provider.name;
-  }
-
-  // Fallback (should not reach here due to floating point)
-  return enabled[enabled.length - 1].name;
-}
-
 interface ParsedArgs {
   command: string;
   query?: string;
@@ -81,8 +50,11 @@ interface ParsedArgs {
     selector?: string;
     metadata?: boolean;
     noNotes?: boolean;
+    /** Internal/test only: deterministic draw for getWeightedRandom. */
+    seed?: number;
   };
 }
+
 
 export function parseArgs(args: string[]): ParsedArgs {
   // First token is the subcommand unless it starts with '--' (defaults to help).
@@ -109,13 +81,29 @@ export function parseArgs(args: string[]): ParsedArgs {
       metadata: { type: 'boolean' },
       json: { type: 'boolean' },
       'no-notes': { type: 'boolean' },
+      seed: { type: 'string' },
       help: { type: 'boolean' },
     },
   });
 
   const max = values.max !== undefined ? Number(values.max) : undefined;
-  if (max !== undefined && !Number.isFinite(max)) {
-    throw new Error(`Invalid --max value: "${values.max}". Expected a number.`);
+  if (max !== undefined && (!Number.isFinite(max) || !Number.isInteger(max) || max <= 0)) {
+    throw new Error(`Invalid --max value: "${values.max}". Expected a positive integer.`);
+  }
+
+  const seed = values.seed !== undefined ? Number(values.seed) : undefined;
+  if (seed !== undefined && !Number.isFinite(seed)) {
+    throw new Error(`Invalid --seed value: "${values.seed}". Expected a finite number.`);
+  }
+
+  const depth = values.depth;
+  if (depth !== undefined && depth !== '0' && depth !== '1' && depth !== '2') {
+    throw new Error(`Invalid --depth value: "${depth}". Expected 0, 1, or 2.`);
+  }
+
+  const format = values.format;
+  if (format !== undefined && !['markdown', 'html', 'links', 'screenshot'].includes(format)) {
+    throw new Error(`Invalid --format value: "${format}". Expected markdown, html, links, or screenshot.`);
   }
 
   return {
@@ -127,13 +115,14 @@ export function parseArgs(args: string[]): ParsedArgs {
       multi: values.multi,
       allFields: values['all-fields'],
       withDates: values['with-dates'],
-      depth: values.depth as ParsedArgs['options']['depth'],
+      depth: values.depth,
       includeDomains: values.include,
       excludeDomains: values.exclude,
-      format: values.format as ParsedArgs['options']['format'],
+      format: format as ParsedArgs['options']['format'],
       selector: values.selector,
       metadata: values.metadata,
       noNotes: values['no-notes'],
+      seed,
     },
   };
 }
@@ -152,7 +141,7 @@ Commands:
 Options:
   --provider <name>  Specify search/fetch provider (e.g., tavily-search, exa-search)
   --max N            Maximum results per call (default: 20; providers self-cap)
-  --multi            Fan out to all providers (OMNIROUTE_PROVIDERS or 4 defaults),
+  --multi            Fan out to all providers (OMNIROUTE_WEBSEARCH_PROVIDERS or 4 defaults),
                      each as a root key: {"tavily-search":[...], ...}
   --all-fields       Search only: return the FULL upstream schema
                      (provider_raw/citation/metadata/display_url/favicon_url/score/...).
@@ -168,12 +157,10 @@ Options:
   --exclude <domains>    Comma-separated domains to exclude
   --json                 Print raw result object (machine-readable)
 
-Config (env vars win over the config file):
-  OMNIROUTE_CUSTOM_WEBSEARCH_URL  OmniRoute base URL (required)
-  OMNIROUTE_API_KEY               API key (required)
-  OMNIROUTE_PROVIDERS             Comma-separated providers (optional)
-  Config file (if env unset): $XDG_CONFIG_HOME/omni-websearch/config
-  or ~/.config/omni-websearch/config  (created as a commented stub on first run)
+Config (environment variables only):
+  OMNIROUTE_WEBSEARCH_URL  OmniRoute base URL (required)
+  OMNIROUTE_WEBSEARCH_API_KEY               API key (required)
+  OMNIROUTE_WEBSEARCH_PROVIDERS             Comma-separated providers (optional)
   `);
 
   if (showNotes && !process.env.OMNIROUTE_NO_NOTES) {
@@ -181,12 +168,16 @@ Config (env vars win over the config file):
   }
 }
 
-async function runSearch(query: string, options: ParsedArgs['options']) {
+type MultiOutcome =
+  | { readonly ok: true; readonly results: readonly unknown[] }
+  | { readonly ok: false; readonly error: string };
+
+async function runSearch(query: string, options: ParsedArgs['options']): Promise<number> {
   const config = await loadConfig();
   if (!config.omniRouteUrl || !config.omniRouteApiKey) {
     throw new Error('Configuration error: OmniRoute URL and API key must be set.');
   }
-  const baseUrl = await resolveBaseUrl(config.omniRouteUrl, config.omniRouteApiKey);
+  const baseUrl = resolveBaseUrl(config.omniRouteUrl);
   if (!baseUrl) {
     throw new Error('Error: No OmniRoute URL configured or reachable.');
   }
@@ -201,25 +192,23 @@ async function runSearch(query: string, options: ParsedArgs['options']) {
       : DEFAULT_SEARCH_MAX);
 
   // --multi: fan out the same query concurrently, one call per target provider.
-  // Upstream always auto-handles search-provider selection; discoverProviders()
-  // is INFO ONLY (surfaced via the `providers` command) and is NEVER reused to
-  // pick/send requests here. Target set resolution:
+  // OmniRoute handles provider selection/fallback. Target set resolution:
   //   --provider        → single explicit call (always wins, sent directly)
-  //   OMNIROUTE_PROVIDERS → fan out over all of them (request focus only)
-  //   neither           → ONE call with NO provider (upstream selects)
-  // Root keys are taken from the UPSTREAM response, not our request — upstream
-  // may resolve/fallback a requested name to a different one, so results merge
-  // under the real upstream key. Per-provider error → that key's value as-is.
+  //   OMNIROUTE_WEBSEARCH_PROVIDERS → fan out over all of them
+  //   neither           → ONE call with NO provider (OmniRoute selects)
+  // Each key holds { ok: true, results } or { ok: false, error }; the exit
+  // code is non-zero only when every provider call fails.
   if (options.multi) {
-    // ONE call per target. With neither --provider nor OMNIROUTE_PROVIDERS, the
+    // ONE call per target. With neither --provider nor OMNIROUTE_WEBSEARCH_PROVIDERS, the
     // single target is `undefined` -> one request with no provider field
-    // (upstream selects). Empty array would skip the call entirely (wrong).
+    // (OmniRoute selects). Empty array would skip the call entirely (wrong).
     const targets: (string | undefined)[] = options.provider
       ? [options.provider]
       : (config.providers ? Object.keys(config.providers) : [undefined]);
 
     const perProvider = await Promise.all(
       targets.map(async (provider) => {
+        const key = provider || 'upstream';
         try {
           const results = await executeSearch(
             query,
@@ -231,31 +220,36 @@ async function runSearch(query: string, options: ParsedArgs['options']) {
             options.includeDomains,
             options.excludeDomains
           );
-          return { provider: provider || 'upstream', results: results.map(curate) } as const;
+          return { key, outcome: { ok: true, results: results.map(curate) } } as const;
         } catch (error) {
-          return { provider: provider || 'upstream', results: error instanceof Error ? error.message : String(error) } as const;
+          return { key, outcome: { ok: false, error: error instanceof Error ? error.message : String(error) } } as const;
         }
       })
     );
 
-    const grouped: Record<string, unknown[]> = {};
-    for (const { provider, results } of perProvider) {
-      if (typeof results === 'string') {
-        grouped[provider] = [results]; // upstream error string as-is
-      } else {
-        grouped[provider] = (grouped[provider] ?? []).concat(results);
-      }
+    const grouped: Record<string, MultiOutcome> = {};
+    for (const { key, outcome } of perProvider) {
+      grouped[key] = outcome;
     }
     console.log(JSON.stringify(grouped, null, 2));
-    return;
+    return perProvider.every(({ outcome }) => !outcome.ok) ? 1 : 0;
   }
 
-  // Single search (default). Upstream always auto-handles provider selection.
-  //   --provider        → explicit win, sent directly (never consults OMNIROUTE_PROVIDERS)
-  //   OMNIROUTE_PROVIDERS → weight-randomized request focus (upstream still selects)
-  //   neither           → omit the field; upstream selects
-  const requestProvider = options.provider
-    ?? (config.providers ? getWeightedRandom(config.providers) : undefined);
+  // Single search (default). Provider resolution, client-side:
+  //   --provider               → explicit request focus (always wins)
+  //   OMNIROUTE_WEBSEARCH_PROVIDERS      → weighted-random pick (first listed = highest
+  //                              weight; enabled set filtered by weight > 0)
+  //   neither                  → omit the field; OmniRoute selects
+  // A --seed makes the draw deterministic (test-only knob).
+  const seededRandom = () => {
+    let h = 2166136261 ^ (options.seed ?? 0);
+    h = Math.imul(h ^ (h >>> 16), 2246822507);
+    h = Math.imul(h ^ (h >>> 13), 3266489909);
+    h ^= h >>> 16;
+    return (h >>> 0) / 0x100000000;
+  };
+  const requestProvider =
+    options.provider ?? (config.providers ? getWeightedRandom(config.providers, options.seed !== undefined ? seededRandom : undefined) : undefined);
 
   const searchResult = await executeSearch(
     query,
@@ -268,110 +262,83 @@ async function runSearch(query: string, options: ParsedArgs['options']) {
     options.excludeDomains
   );
   console.log(JSON.stringify(searchResult.map(curate), null, 2));
+  return 0;
 }
 
-async function runFetch(url: string, options: ParsedArgs['options']) {
-  if (!url || !/^https?:\/\//i.test(url)) {
+async function runFetch(url: string, options: ParsedArgs['options']): Promise<void> {
+  // Parse the URL so only http/https targets reach OmniRoute.
+  let urlIsValid = false;
+  try {
+    const parsed = new URL(url);
+    urlIsValid = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+  }
+  if (!urlIsValid) {
     throw new Error('Error: A valid http/https URL is required (omni-websearch fetch <url>).');
   }
   const config = await loadConfig();
   if (!config.omniRouteUrl || !config.omniRouteApiKey) {
     throw new Error('Configuration error: OmniRoute URL and API key must be set.');
   }
-  const baseUrl = await resolveBaseUrl(config.omniRouteUrl, config.omniRouteApiKey);
+  const baseUrl = resolveBaseUrl(config.omniRouteUrl);
   if (!baseUrl) {
     throw new Error('Error: No OmniRoute URL configured or reachable.');
   }
 
-  const depth = options.depth !== undefined ? (Number(options.depth) as 0 | 1 | 2) : undefined;
-
-  // Without an explicit --provider, route a param-bearing fetch to the known,
-  // tested provider that can honor it, so the flag is never silently dropped.
-  let provider = options.provider;
-  if (!provider) {
-    if (options.format) { provider = 'exa-search'; process.stderr.write('Routed to exa-search (--format is only honored by exa).\n'); }
-    else if (depth !== undefined) { provider = 'tavily-search'; process.stderr.write('Routed to tavily-search (--depth is only honored by tavily).\n'); }
-  }
-
-  // Fetch-provider-specific validation (grounded in the OmniRoute web-fetch
-  // contract). Fail fast on impossible combos; warn where a param is silently
-  // ignored upstream, so the user is never surprised by a 400 or dropped flag.
-  const caps = provider ? FETCH_PROVIDER_CAPS[provider] : undefined;
-  if (provider && !caps) {
-    throw new Error(`Unknown fetch provider: "${provider}". Known: ${Object.keys(FETCH_PROVIDER_CAPS).join(', ')}`);
-  }
-  if (caps && options.format && !caps.formats.includes(options.format)) {
-    throw new Error(`--format "${options.format}" is not supported by --provider ${provider} (supported: ${caps.formats.join(', ')}).`);
-  }
-  if (caps && depth !== undefined && !caps.honorsDepth) {
-    process.stderr.write(`Warning: --provider ${provider} ignores --depth (upstream drops it). Request proceeds.\n`);
-  }
-
-  try {
-    const result = await executeFetch(
-      url,
-      baseUrl,
-      config.omniRouteApiKey,
-      {
-        provider: provider,
-        format: options.format,
-        depth,
-        waitForSelector: options.selector,
-        includeMetadata: options.metadata,
-      },
-      config.timeout
-    );
-    console.log(JSON.stringify(result, null, 2));
-  } catch (error) {
-    // Re-throw upstream error verbatim (already formatted in search.ts).
-    throw error;
-  }
+  // Provider selection is left to OmniRoute; --provider is passed through as-is.
+  const result = await executeFetch(
+    url,
+    baseUrl,
+    config.omniRouteApiKey,
+    {
+      provider: options.provider,
+      format: options.format,
+      depth: options.depth !== undefined ? (Number(options.depth) as 0 | 1 | 2) : undefined,
+      waitForSelector: options.selector,
+      includeMetadata: options.metadata,
+    },
+    config.timeout
+  );
+  console.log(JSON.stringify(result, null, 2));
 }
 
-async function runHealthcheck() {
+async function runHealthcheck(): Promise<void> {
   const config = await loadConfig();
   if (!config.omniRouteUrl || !config.omniRouteApiKey) {
     throw new Error('Configuration error: OmniRoute URL and API key must be set.');
   }
-  const baseUrl = await resolveBaseUrl(config.omniRouteUrl, config.omniRouteApiKey);
+  const baseUrl = resolveBaseUrl(config.omniRouteUrl);
   if (!baseUrl) {
     throw new Error('Error: No OmniRoute URL configured or reachable.');
   }
-  const { omniRouteApiKey } = config;
 
-  try {
-    if (await checkHealth(baseUrl, omniRouteApiKey)) {
-      console.log('✓ OmniRoute is responding');
-    } else {
-      console.error('✗ OmniRoute is not responding');
-    }
-  } catch (error) {
-    console.error('✗ Health check failed:', error instanceof Error ? error.message : error);
+  if (!(await checkHealth(baseUrl, config.omniRouteApiKey))) {
+    throw new Error('OmniRoute is not responding');
   }
+  console.log(JSON.stringify({ ok: true }));
 }
 
-async function runProviders() {
+async function runProviders(): Promise<void> {
   const config = await loadConfig();
   if (!config.omniRouteUrl || !config.omniRouteApiKey) {
     throw new Error('Configuration error: OmniRoute URL and API key must be set.');
   }
-  const baseUrl = await resolveBaseUrl(config.omniRouteUrl, config.omniRouteApiKey);
+  const baseUrl = resolveBaseUrl(config.omniRouteUrl);
 
+  let providers: string[];
   try {
-    const providers = await discoverProviders(baseUrl, config.omniRouteApiKey);
-    console.log('Available search providers:');
-    for (const p of providers) {
-      console.log(`  - ${p}`);
-    }
+    providers = await discoverProviders(baseUrl, config.omniRouteApiKey);
   } catch (error) {
     throw new Error(`Failed to discover providers: ${error instanceof Error ? error.message : error}`);
   }
+  console.log(JSON.stringify(providers, null, 2));
 }
 
-export async function runCli(argv: string[]) {
+export async function runCli(argv: string[]): Promise<number> {
   if (argv.includes('--version') || argv.includes('-v')) {
     console.log(getPackageVersion());
-    return;
+    return 0;
   }
 
   const parsed = parseArgs(argv);
@@ -381,23 +348,22 @@ export async function runCli(argv: string[]) {
       if (!parsed.query) {
         throw new Error('Error: No search query provided');
       }
-      await runSearch(parsed.query, parsed.options);
-      break;
+      return await runSearch(parsed.query, parsed.options);
     case 'fetch':
       if (!parsed.query) {
         throw new Error('Error: No URL provided');
       }
       await runFetch(parsed.query, parsed.options);
-      break;
+      return 0;
     case 'healthcheck':
       await runHealthcheck();
-      break;
+      return 0;
     case 'providers':
       await runProviders();
-      break;
+      return 0;
     case 'help':
       printUsage(!parsed.options.noNotes);
-      break;
+      return 0;
     default:
       throw new Error(`Unknown command: ${parsed.command}`);
   }
@@ -405,11 +371,11 @@ export async function runCli(argv: string[]) {
 
 async function main() {
   try {
-    await runCli(process.argv.slice(2));
+    process.exitCode = await runCli(process.argv.slice(2));
   } catch (error) {
-    console.error('Fatal error:', error instanceof Error ? error.message : String(error));
-    printUsage();
-    process.exit(1);
+    process.stderr.write(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+    process.stderr.write('\n');
+    process.exitCode = 1;
   }
 }
 

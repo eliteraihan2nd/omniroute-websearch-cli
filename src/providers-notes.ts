@@ -71,7 +71,7 @@ export function formatProviderNotes(): string {
   out.push('=== PROVIDER INSIGHTS (read me) — suppress with --no-notes ===');
   out.push('SEARCH providers:');
   out.push(render(SEARCH_PROVIDER_NOTES));
-  out.push('  DEFAULTS ALREADY TUNED: providers set in OMNIROUTE_PROVIDERS already use their');
+  out.push('  DEFAULTS ALREADY TUNED: providers set in OMNIROUTE_WEBSEARCH_PROVIDERS already use their');
   out.push('  strength — per-provider --max is preset and the default output is already');
   out.push('  curated (only necessary keys). --all-fields restores the full schema.');
   out.push('  No extra tuning needed for a balanced search.');

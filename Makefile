@@ -9,7 +9,7 @@
 # Variables
 NODE ?= node
 NPM ?= npm
-API_KEY ?= $(OMNIROUTE_API_KEY)
+API_KEY ?= $(OMNIROUTE_WEBSEARCH_API_KEY)
 CLI_PATH := dist/index.js
 
 # ============================================================
@@ -24,7 +24,7 @@ help: ## Show available commands
 	@echo "Usage: make <command>"
 	@echo ""
 	@echo "Configuration:"
-	@echo "  Export OMNIROUTE_CUSTOM_WEBSEARCH_URL and OMNIROUTE_API_KEY (env-only)."
+	@echo "  Export OMNIROUTE_WEBSEARCH_URL and OMNIROUTE_WEBSEARCH_API_KEY (env-only)."
 	@echo ""
 
 # ============================================================
