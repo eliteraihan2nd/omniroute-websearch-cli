@@ -55,10 +55,22 @@ omni-websearch healthcheck
 ```
 
 The `install` script detects OS/arch, downloads the matching CI-built binary
-from the latest GitHub Release, and installs it to `~/.local/bin` (respects
-`XDG_BIN_DIR`). **No bun, no node, no local repo.** Binaries are built and
-published automatically by GitHub Actions on each `v*` tag (see
-`.github/workflows/release.yml`).
+from the latest GitHub Release, **verifies its sha256 checksum** against the
+`checksums.txt` published with that release, and installs it to `~/.local/bin`
+(respects `XDG_BIN_DIR`). **No bun, no node, no local repo.** Binaries and
+checksums are built and published automatically by GitHub Actions on each
+`v*` tag (see `.github/workflows/release.yml`).
+
+**Update = re-run the same one-liner** — the script is idempotent and replaces
+the binary in place. No separate update command needed.
+
+**Version pin** (e.g. rollback): pass the tag as an argument or env var
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eliteraihan2nd/omniroute-websearch-cli/main/install | bash -s v0.2.0
+# or
+curl -fsSL https://raw.githubusercontent.com/eliteraihan2nd/omniroute-websearch-cli/main/install | INSTALL_VERSION=v0.2.0 bash
+```
 
 > Prebuilt binaries exist only after a `v*` tag is pushed. Until then, use
 > path 1, 2, or 3.

@@ -1,12 +1,28 @@
 #!/usr/bin/env sh
 # omni-websearch installer — opencode-style.
-# Detects OS/arch, downloads the matching CI-built Release asset, installs to
-# ~/.local/bin, and verifies it is on PATH. No bun/node required at runtime.
+# Detects OS/arch, downloads the matching CI-built Release asset, verifies its
+# sha256 checksum, installs to ~/.local/bin, and verifies it is on PATH.
+# No bun/node required at runtime. Idempotent: re-running updates the binary to
+# the latest release. Optional version pin via INSTALL_VERSION or first arg:
+#   curl -fsSL .../install | bash            # install latest
+#   curl -fsSL .../install | bash -s v0.2.0   # install a specific release
 set -eu
 
 REPO="eliteraihan2nd/omniroute-websearch-cli"
 BIN="omni-websearch"
 INSTALL_DIR="${XDG_BIN_DIR:-$HOME/.local/bin}"
+
+# --- optional version pin (default: latest) ---
+VERSION="${INSTALL_VERSION:-${1:-latest}}"
+case "$VERSION" in
+  latest|v*) ;;
+  *) VERSION="v${VERSION}" ;;   # accept bare "0.2.0"
+esac
+if [ "$VERSION" = "latest" ]; then
+  RELEASE_URL="https://github.com/${REPO}/releases/latest/download"
+else
+  RELEASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+fi
 
 # --- detect OS/arch (mirrors opencode's install.sh) ---
 raw_os=$(uname -s)
@@ -30,24 +46,54 @@ case "$arch" in
 esac
 
 asset="omni-websearch-${os}-${arch}"
-url="https://github.com/${REPO}/releases/latest/download/${asset}"
 
+# --- temp dir with guaranteed cleanup on any exit ---
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT INT TERM
+
+# --- download helper ---
+download() { # $1 = url  $2 = dest
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1"
+  else
+    echo "Error: curl or wget required." >&2
+    return 1
+  fi
+}
+
+echo "Installing ${BIN} ${VERSION} (${os}-${arch}) -> ${INSTALL_DIR}/${BIN}"
+download "${RELEASE_URL}/${asset}" "${tmpdir}/${asset}"
+download "${RELEASE_URL}/checksums.txt" "${tmpdir}/checksums.txt"
 mkdir -p "$INSTALL_DIR"
-tmp=$(mktemp)
 
-echo "Installing ${BIN} (${os}-${arch}) -> ${INSTALL_DIR}/${BIN}"
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$url" -o "$tmp"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$tmp" "$url"
+# --- sha256 verification against the release checksums.txt ---
+if command -v sha256sum >/dev/null 2>&1; then
+  SHASUM="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  SHASUM="shasum -a 256"
 else
-  echo "Error: curl or wget required." >&2
-  rm -f "$tmp"
+  echo "Error: sha256sum or shasum required for checksum verification." >&2
   exit 1
 fi
 
-mv "$tmp" "${INSTALL_DIR}/${BIN}"
+expected=$($SHASUM "${tmpdir}/${asset}" | awk '{print $1}')
+actual=$(awk -v a="$asset" '$2 == a {print $1}' "${tmpdir}/checksums.txt")
+if [ -z "$actual" ]; then
+  echo "Error: no checksum found for ${asset} in the release. Aborting (won't install unverified)." >&2
+  exit 1
+fi
+if [ "$actual" != "$expected" ]; then
+  echo "Checksum mismatch for ${asset}. Expected ${actual}, got ${expected}. Aborting." >&2
+  exit 1
+fi
+
+# --- install atomically (same-dir rename), overwriting any older binary ---
+cp "${tmpdir}/${asset}" "${INSTALL_DIR}/${BIN}.tmp"
+mv "${INSTALL_DIR}/${BIN}.tmp" "${INSTALL_DIR}/${BIN}"
 chmod +x "${INSTALL_DIR}/${BIN}"
+rm -f "${INSTALL_DIR}/${BIN}.tmp"
 
 # --- PATH check ---
 case ":$PATH:" in
@@ -60,4 +106,5 @@ case ":$PATH:" in
     ;;
 esac
 
-echo "Done. Run: ${BIN} healthcheck"
+echo "Done (checksum verified). Re-run this command any time to update."
+echo "Run: ${BIN} healthcheck"
