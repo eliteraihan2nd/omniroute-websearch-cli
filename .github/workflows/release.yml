@@ -33,7 +33,7 @@ jobs:
         run: bun ci
 
       - name: Typecheck
-        run: bunx tsc --noEmit
+        run: npm run typecheck
 
       - name: Build dist
         run: bun run build
@@ -42,16 +42,22 @@ jobs:
         run: npm test
 
       - name: Compile standalone binary
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          bun build dist/src/index.js --compile --minify \
-            --define:process.env.OMNI_WEBSEARCH_VERSION="\"$VERSION\"" \
-            --outfile "omni-websearch-${{ matrix.target }}"
+        run: bun build dist/src/index.js --compile --minify --outfile "omni-websearch-${{ matrix.target }}"
 
       - name: Smoke test binary (version + help)
         run: |
-          "./omni-websearch-${{ matrix.target }}" --version
-          "./omni-websearch-${{ matrix.target }}" help | head -20
+          VERSION=$(node -p "require('./package.json').version")
+          tmp=$(mktemp -d)
+          cp "omni-websearch-${{ matrix.target }}" "$tmp/omni-websearch"
+          cd "$tmp"
+          # version must match package.json and work with no package.json around
+          actual=$("./omni-websearch" --version)
+          echo "version: $actual (expected $VERSION)"
+          if [ "$actual" != "$VERSION" ]; then
+            echo "version mismatch: got '$actual', expected '$VERSION'" >&2
+            exit 1
+          fi
+          "./omni-websearch" help | head -20
 
       - name: Smoke test binary (invalid input exits non-zero)
         run: |

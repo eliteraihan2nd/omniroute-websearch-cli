@@ -1,6 +1,6 @@
 {
   "name": "omniroute-websearch-cli",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Env-only CLI for OmniRoute web search and web fetch via /v1/search and /v1/web/fetch",
   "bin": {
     "omni-websearch": "./dist/src/index.js"
@@ -10,7 +10,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/src/index.js",
+    "build": "node scripts/gen-version.mjs && tsc && chmod +x dist/src/index.js",
+    "typecheck": "node scripts/gen-version.mjs && tsc --noEmit",
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
     "test": "node --test dist/**/*.test.js",
