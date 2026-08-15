@@ -15,6 +15,10 @@ import { executeSearch, checkHealth, discoverProviders, executeFetch, curateSear
 import { formatProviderNotes } from './providers-notes.js';
 
 function getPackageVersion(): string {
+  // Compiled standalone binaries (CI `bun build --compile --define:...`) bake
+  // the version here; the fs walk below is only a dev fallback (tsc/bun dist).
+  const baked = process.env.OMNI_WEBSEARCH_VERSION;
+  if (baked) return baked;
   const fs = require('node:fs') as typeof import('node:fs');
   const path = require('node:path');
   // Walk up from __dirname to find package.json (covers node dist/src and

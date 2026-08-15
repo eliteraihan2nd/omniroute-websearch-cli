@@ -42,7 +42,11 @@ jobs:
         run: npm test
 
       - name: Compile standalone binary
-        run: bun build dist/src/index.js --compile --minify --outfile "omni-websearch-${{ matrix.target }}"
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          bun build dist/src/index.js --compile --minify \
+            --define:process.env.OMNI_WEBSEARCH_VERSION="\"$VERSION\"" \
+            --outfile "omni-websearch-${{ matrix.target }}"
 
       - name: Smoke test binary (version + help)
         run: |

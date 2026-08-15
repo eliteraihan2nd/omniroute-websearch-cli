@@ -64,8 +64,15 @@ download() { # $1 = url  $2 = dest
 }
 
 echo "Installing ${BIN} ${VERSION} (${os}-${arch}) -> ${INSTALL_DIR}/${BIN}"
+# checksums first: a release without checksums.txt (pre-v0.1.7) is rejected
+# with a clear message instead of a bare curl 404 mid-script.
+if ! download "${RELEASE_URL}/checksums.txt" "${tmpdir}/checksums.txt"; then
+  echo "Error: ${RELEASE_URL}/checksums.txt is missing." >&2
+  echo "Releases before v0.1.7 ship no checksums — use 'latest' or a newer tag." >&2
+  echo "Won't install unverified binaries." >&2
+  exit 1
+fi
 download "${RELEASE_URL}/${asset}" "${tmpdir}/${asset}"
-download "${RELEASE_URL}/checksums.txt" "${tmpdir}/checksums.txt"
 mkdir -p "$INSTALL_DIR"
 
 # --- sha256 verification against the release checksums.txt ---
