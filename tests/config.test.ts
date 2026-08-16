@@ -129,27 +129,32 @@ describe('getWeightedRandom', () => {
   //   draw ∈ [0, 3/6)   → tavily-search
   //   draw ∈ [3/6, 5/6) → exa-search
   //   draw ∈ [5/6, 1)   → brave-search
-  const draw = (value: number) => () => value;
+  const draw = (value: number) => mock.method(Math, 'random', () => value);
 
   const providers = { 'tavily-search': 3, 'exa-search': 2, 'brave-search': 1 };
 
   it('selects the first provider when the draw lands in its range', () => {
-    assert.equal(getWeightedRandom(providers, draw(0)), 'tavily-search');
+    draw(0);
+    assert.equal(getWeightedRandom(providers), 'tavily-search');
   });
 
   it('selects a later provider when the draw falls outside earlier ranges', () => {
-    assert.equal(getWeightedRandom(providers, draw(4 / 6)), 'exa-search');
+    draw(4 / 6);
+    assert.equal(getWeightedRandom(providers), 'exa-search');
   });
 
   it('returns the last provider for a draw at the top of the range', () => {
-    assert.equal(getWeightedRandom(providers, draw(1)), 'brave-search');
+    draw(1);
+    assert.equal(getWeightedRandom(providers), 'brave-search');
   });
 
   it('returns undefined when every provider is disabled (weight <= 0)', () => {
-    assert.equal(getWeightedRandom({ 'exa-search': 0, 'tavily-search': -1 }, draw(0)), undefined);
+    draw(0);
+    assert.equal(getWeightedRandom({ 'exa-search': 0, 'tavily-search': -1 }), undefined);
   });
 
   it('returns undefined for an empty provider map', () => {
-    assert.equal(getWeightedRandom({}, draw(0)), undefined);
+    draw(0);
+    assert.equal(getWeightedRandom({}), undefined);
   });
 });

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigurationError, loadConfig } from '../src/config.js';
 import { parseArgs, runCli } from '../src/index.js';
-import { executeFetch, executeSearch } from '../src/search.js';
+import { executeFetch, executeSearch, discoverProviders } from '../src/search.js';
 
 const configVariables = [
   'OMNIROUTE_WEBSEARCH_URL',
@@ -151,7 +151,7 @@ describe('CLI JSON and environment contract', () => {
       output.push(values.map(String).join(' '));
     });
 
-    await runCli(['search', 'query', '--json']);
+    await runCli(['search', 'query']);
 
     assert.deepEqual(JSON.parse(output[0] ?? ''), [{
       title: 'Result',
@@ -164,13 +164,55 @@ describe('CLI JSON and environment contract', () => {
     process.env.OMNIROUTE_WEBSEARCH_URL = 'https://omni.example';
     process.env.OMNIROUTE_WEBSEARCH_API_KEY = 'key';
     process.env.OMNIROUTE_WEBSEARCH_PROVIDERS = 'exa-search,tavily-search';
-    // --seed 5 makes the weighted draw deterministic; with weights
-    // { 'exa-search': 2, 'tavily-search': 1 } the pick is exa-search.
+    // Math.random = 0.99 lands past the exa-search cumulative weight (2/3),
+    // so the weighted draw must pick tavily-search deterministically.
+    const randomMock = mock.method(Math, 'random', () => 0.99);
     mockJsonResponse([]);
 
-    await runCli(['search', 'query', '--seed', '5']);
+    await runCli(['search', 'query']);
+    randomMock.mock.restore();
 
     const requestBody = JSON.parse(String((fetchMock?.mock.calls[0]?.arguments[1] as RequestInit | undefined)?.body));
-    assert.equal(requestBody.provider, 'exa-search');
+    assert.equal(requestBody.provider, 'tavily-search');
+  });
+});
+
+describe('discoverProviders', () => {
+  afterEach(() => {
+    fetchMock?.mock.restore();
+    fetchMock = undefined;
+  });
+
+  it('rejects with an API-key hint when the server returns 401', async () => {
+    fetchMock = mock.method(
+      globalThis,
+      'fetch',
+      async () => new Response('{"error":{"code":"AUTH_002"}}', { status: 401, statusText: 'Unauthorized' }),
+    );
+
+    await assert.rejects(
+      () => discoverProviders('https://omni.example', 'bad-key'),
+      /check OMNIROUTE_WEBSEARCH_API_KEY/,
+    );
+  });
+
+  it('returns provider ids from a successful response', async () => {
+    fetchMock = mock.method(
+      globalThis,
+      'fetch',
+      async () => new Response(JSON.stringify({ data: [{ id: 'exa-search' }, { id: 'tavily-search' }] }), { status: 200 }),
+    );
+
+    assert.deepEqual(await discoverProviders('https://omni.example', 'key'), ['exa-search', 'tavily-search']);
+  });
+
+  it('returns an empty array for a valid 200 response with no providers', async () => {
+    fetchMock = mock.method(
+      globalThis,
+      'fetch',
+      async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    );
+
+    assert.deepEqual(await discoverProviders('https://omni.example', 'key'), []);
   });
 });

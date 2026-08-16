@@ -74,7 +74,7 @@ export class ConfigurationError extends Error {
   readonly name = 'ConfigurationError';
 }
 
-export function getWeightedRandom(providers: Record<string, number>, random?: () => number): string | undefined {
+export function getWeightedRandom(providers: Record<string, number>): string | undefined {
   // Filter to enabled providers: weight must be a positive finite number
   const enabled: Array<{ name: string; weight: number }> = [];
   for (const [name, rawWeight] of Object.entries(providers)) {
@@ -87,12 +87,7 @@ export function getWeightedRandom(providers: Record<string, number>, random?: ()
   if (enabled.length === 0) return undefined;
 
   const totalWeight = enabled.reduce((sum, p) => sum + p.weight, 0);
-  const drawNumber = (() => {
-    if (random) return random();
-    const buf = new Uint32Array(1);
-    crypto.getRandomValues(buf);
-    return buf[0] / (0xFFFFFFFF + 1);
-  })();
+  const drawNumber = Math.random();
   let cursor = drawNumber * totalWeight;
 
   for (const provider of enabled) {
@@ -129,11 +124,9 @@ export function normalizeProviders(
  *   `new URL('/v1/search', baseUrl)`   → https://host/v1/search   (never /v1/v1)
  *   `new URL('/v1/web/fetch', baseUrl)` → https://host/v1/web/fetch
  *
- * The `apiKey` parameter is accepted for legacy callers and ignored —
- * reachability is checked by the caller's first real API call. Throws
- * ConfigurationError for a syntactically invalid URL.
+ * Throws ConfigurationError for a syntactically invalid URL.
  */
-export function resolveBaseUrl(rawUrl: string, _apiKey?: string): string {
+export function resolveBaseUrl(rawUrl: string): string {
   const url = rawUrl.trim();
   if (url === '') throw new ConfigurationError('No base URL configured. Export OMNIROUTE_WEBSEARCH_URL.');
   let parsed: URL;

@@ -7,16 +7,16 @@ set -e
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 # Local-dev only: load .env from the repo root if present (no dotenv dep).
-# set -a exports every KEY=VALUE into the environment for the bun subprocess.
-if [ -f "$DIR/.env" ]; then
-  set -a
-  . "$DIR/.env"
-  set +a
-fi
+# bun --env-file reads .env natively; keep whatever the shell already exports.
+ENVFILE="$DIR/.env"
 
 BIN="$DIR/dist/src/index.js"
 if [ ! -f "$BIN" ]; then
   echo "dist not built; running build first…" >&2
   (cd "$DIR" && bun run build)
 fi
-exec bun "$BIN" "$@"
+if [ -f "$ENVFILE" ]; then
+  exec bun --env-file="$ENVFILE" "$BIN" "$@"
+else
+  exec bun "$BIN" "$@"
+fi

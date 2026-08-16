@@ -2,8 +2,10 @@
  * OmniRoute Search API Client
  *
  * Provides access to search providers via OmniRoute.
- * Providers are discovered at runtime from OmniRoute.
+ * Configured via OMNIROUTE_WEBSEARCH_URL / OMNIROUTE_WEBSEARCH_API_KEY.
  */
+import { DEFAULTS } from './config.js';
+
 export interface SearchResult {
   title: string;
   url: string;
@@ -92,9 +94,6 @@ export async function executeSearch(
 ): Promise<SearchResult[]> {
   const url = new URL('/v1/search', baseUrl);
 
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout || 60000);
-
   try {
     const response = await fetch(url.toString(), {
       method: 'POST',
@@ -110,9 +109,8 @@ export async function executeSearch(
         ...(includeDomains && { include_domains: includeDomains.split(',') }),
         ...(excludeDomains && { exclude_domains: excludeDomains.split(',') }),
       }),
-      signal: controller.signal,
+      signal: AbortSignal.timeout(timeout || 60000),
     });
-    clearTimeout(id);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -124,9 +122,8 @@ export async function executeSearch(
     if (Array.isArray(data)) return data;
     return data.results;
   } catch (error) {
-    clearTimeout(id);
     if (error instanceof Error) {
-      if (error.name === 'AbortError') {
+      if (error.name === 'TimeoutError') {
         throw new Error(`Search request timed out after ${timeout || 60000}ms`);
       }
       throw error;
@@ -135,45 +132,82 @@ export async function executeSearch(
   }
 }
 
+export interface HealthResult {
+  ok: boolean;
+  /** HTTP status when the server responded; 0 on network failure or timeout. */
+  status: number;
+  statusText: string;
+  /** Short response body excerpt when the server responded with an error. */
+  body?: string;
+}
+
+/**
+ * Liveness probe. OmniRoute exposes no /v1/health route; GET /v1/search (the
+ * provider listing endpoint) is the cheapest reachability check.
+ *
+ * Distinguishes connectivity from credential problems: a 401/403 means the
+ * endpoint is up but the API key was rejected; status 0 means the host was
+ * unreachable or the probe timed out.
+ */
 export async function checkHealth(
   baseUrl: string,
   apiKey: string,
-): Promise<boolean> {
-  // OmniRoute exposes no /v1/health route. Use GET /v1/search (the provider
-  // listing endpoint) as a liveness probe — it returns 200 when reachable and
-  // requires no search cost.
+): Promise<HealthResult> {
   const url = new URL('/v1/search', baseUrl);
-  const response = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-    },
-  });
-  return response.ok;
+  try {
+    const response = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      signal: AbortSignal.timeout(DEFAULTS.probeTimeout),
+    });
+    const body = response.ok ? undefined : (await response.text()).slice(0, 300);
+    return { ok: response.ok, status: response.status, statusText: response.statusText, body };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      statusText: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function discoverProviders(
   baseUrl: string,
   apiKey: string,
 ): Promise<string[]> {
+  let response: Response;
   try {
     const url = new URL('/v1/search', baseUrl);
-    const response = await fetch(url.toString(), {
+    response = await fetch(url.toString(), {
       headers: {
         'Authorization': `Bearer ${apiKey}`,
       },
     });
-
-    if (response.ok) {
-      const data = await response.json() as ProviderListResponse;
-      if (data.data && Array.isArray(data.data)) {
-        return data.data.map(p => p.id);
-      }
-    }
-  } catch {
-    // No providers discovered — return empty; OmniRoute handles selection.
+  } catch (error) {
+    throw new Error(
+      `OmniRoute is not responding (${error instanceof Error ? error.message : String(error)}).`,
+    );
   }
 
+  if (!response.ok) {
+    const hint =
+      response.status === 401 || response.status === 403
+        ? ' — check OMNIROUTE_WEBSEARCH_API_KEY'
+        : '';
+    throw new Error(
+      `OmniRoute rejected the request (HTTP ${response.status} ${response.statusText})${hint}.`,
+    );
+  }
+
+  const data = await response.json() as ProviderListResponse;
+  if (data.data && Array.isArray(data.data)) {
+    return data.data.map((p) => p.id);
+  }
+
+  // Valid 200 with no providers listed; empty is a legitimate outcome and
+  // OmniRoute still handles selection.
   return [];
 }
 
@@ -191,9 +225,6 @@ export async function executeFetch(
 ): Promise<FetchResponse> {
   const url = new URL('/v1/web/fetch', baseUrl);
 
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout || 60000);
-
   try {
     const response = await fetch(url.toString(), {
       method: 'POST',
@@ -209,9 +240,8 @@ export async function executeFetch(
         ...(options.waitForSelector && { wait_for_selector: options.waitForSelector }),
         ...(options.includeMetadata && { include_metadata: options.includeMetadata }),
       }),
-      signal: controller.signal,
+      signal: AbortSignal.timeout(timeout || 60000),
     });
-    clearTimeout(id);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -221,9 +251,8 @@ export async function executeFetch(
 
     return (await response.json()) as FetchResponse;
   } catch (error) {
-    clearTimeout(id);
     if (error instanceof Error) {
-      if (error.name === 'AbortError') {
+      if (error.name === 'TimeoutError') {
         throw new Error(`Fetch request timed out after ${timeout || 60000}ms`);
       }
       throw error;

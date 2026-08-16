@@ -39,8 +39,6 @@ interface ParsedArgs {
     selector?: string;
     metadata?: boolean;
     noNotes?: boolean;
-    /** Internal/test only: deterministic draw for getWeightedRandom. */
-    seed?: number;
   };
 }
 
@@ -68,9 +66,7 @@ export function parseArgs(args: string[]): ParsedArgs {
       format: { type: 'string' },
       selector: { type: 'string' },
       metadata: { type: 'boolean' },
-      json: { type: 'boolean' },
       'no-notes': { type: 'boolean' },
-      seed: { type: 'string' },
       help: { type: 'boolean' },
     },
   });
@@ -78,11 +74,6 @@ export function parseArgs(args: string[]): ParsedArgs {
   const max = values.max !== undefined ? Number(values.max) : undefined;
   if (max !== undefined && (!Number.isFinite(max) || !Number.isInteger(max) || max <= 0)) {
     throw new Error(`Invalid --max value: "${values.max}". Expected a positive integer.`);
-  }
-
-  const seed = values.seed !== undefined ? Number(values.seed) : undefined;
-  if (seed !== undefined && !Number.isFinite(seed)) {
-    throw new Error(`Invalid --seed value: "${values.seed}". Expected a finite number.`);
   }
 
   const depth = values.depth;
@@ -111,7 +102,6 @@ export function parseArgs(args: string[]): ParsedArgs {
       selector: values.selector,
       metadata: values.metadata,
       noNotes: values['no-notes'],
-      seed,
     },
   };
 }
@@ -144,7 +134,6 @@ Options:
   --no-notes         Suppress the built-in provider insights notice
   --include <domains>    Comma-separated domains to include (e.g., 'wikipedia.org,arxiv.org')
   --exclude <domains>    Comma-separated domains to exclude
-  --json                 Print raw result object (machine-readable)
 
 Config (environment variables only):
   OMNIROUTE_WEBSEARCH_URL  OmniRoute base URL (required)
@@ -163,13 +152,7 @@ type MultiOutcome =
 
 async function runSearch(query: string, options: ParsedArgs['options']): Promise<number> {
   const config = await loadConfig();
-  if (!config.omniRouteUrl || !config.omniRouteApiKey) {
-    throw new Error('Configuration error: OmniRoute URL and API key must be set.');
-  }
   const baseUrl = resolveBaseUrl(config.omniRouteUrl);
-  if (!baseUrl) {
-    throw new Error('Error: No OmniRoute URL configured or reachable.');
-  }
 
   const curate = (r: SearchResult) => (options.allFields ? r : curateSearchResult(r, !!options.withDates));
 
@@ -226,19 +209,9 @@ async function runSearch(query: string, options: ParsedArgs['options']): Promise
 
   // Single search (default). Provider resolution, client-side:
   //   --provider               → explicit request focus (always wins)
-  //   OMNIROUTE_WEBSEARCH_PROVIDERS      → weighted-random pick (first listed = highest
-  //                              weight; enabled set filtered by weight > 0)
+  //   OMNIROUTE_WEBSEARCH_PROVIDERS      → weighted-random pick (first listed = highest weight)
   //   neither                  → omit the field; OmniRoute selects
-  // A --seed makes the draw deterministic (test-only knob).
-  const seededRandom = () => {
-    let h = 2166136261 ^ (options.seed ?? 0);
-    h = Math.imul(h ^ (h >>> 16), 2246822507);
-    h = Math.imul(h ^ (h >>> 13), 3266489909);
-    h ^= h >>> 16;
-    return (h >>> 0) / 0x100000000;
-  };
-  const requestProvider =
-    options.provider ?? (config.providers ? getWeightedRandom(config.providers, options.seed !== undefined ? seededRandom : undefined) : undefined);
+  const requestProvider = options.provider ?? (config.providers ? getWeightedRandom(config.providers) : undefined);
 
   const searchResult = await executeSearch(
     query,
@@ -267,13 +240,7 @@ async function runFetch(url: string, options: ParsedArgs['options']): Promise<vo
     throw new Error('Error: A valid http/https URL is required (omni-websearch fetch <url>).');
   }
   const config = await loadConfig();
-  if (!config.omniRouteUrl || !config.omniRouteApiKey) {
-    throw new Error('Configuration error: OmniRoute URL and API key must be set.');
-  }
   const baseUrl = resolveBaseUrl(config.omniRouteUrl);
-  if (!baseUrl) {
-    throw new Error('Error: No OmniRoute URL configured or reachable.');
-  }
 
   // Provider selection is left to OmniRoute; --provider is passed through as-is.
   const result = await executeFetch(
@@ -294,25 +261,23 @@ async function runFetch(url: string, options: ParsedArgs['options']): Promise<vo
 
 async function runHealthcheck(): Promise<void> {
   const config = await loadConfig();
-  if (!config.omniRouteUrl || !config.omniRouteApiKey) {
-    throw new Error('Configuration error: OmniRoute URL and API key must be set.');
-  }
   const baseUrl = resolveBaseUrl(config.omniRouteUrl);
-  if (!baseUrl) {
-    throw new Error('Error: No OmniRoute URL configured or reachable.');
-  }
 
-  if (!(await checkHealth(baseUrl, config.omniRouteApiKey))) {
-    throw new Error('OmniRoute is not responding');
+  const health = await checkHealth(baseUrl, config.omniRouteApiKey);
+  if (!health.ok) {
+    if (health.status === 401 || health.status === 403) {
+      throw new Error(`OmniRoute rejected the API key (HTTP ${health.status} ${health.statusText}) — check OMNIROUTE_WEBSEARCH_API_KEY.`);
+    }
+    if (health.status > 0) {
+      throw new Error(`OmniRoute is not responding (HTTP ${health.status} ${health.statusText}).`);
+    }
+    throw new Error(`OmniRoute is not responding (${health.statusText}).`);
   }
   console.log(JSON.stringify({ ok: true }));
 }
 
 async function runProviders(): Promise<void> {
   const config = await loadConfig();
-  if (!config.omniRouteUrl || !config.omniRouteApiKey) {
-    throw new Error('Configuration error: OmniRoute URL and API key must be set.');
-  }
   const baseUrl = resolveBaseUrl(config.omniRouteUrl);
 
   let providers: string[];
